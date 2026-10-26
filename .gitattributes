@@ -1,0 +1,5 @@
+bootstrap text eol=lf
+deps/* text eol=lf
+*.sh text eol=lf
+*.fish text eol=lf
+README.MD text eol=lf

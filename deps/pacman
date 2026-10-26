@@ -1,0 +1,14 @@
+alacritty alacritty
+cava cava
+fastfetch fastfetch
+fish fish eza zoxide fzf fastfetch starship
+fuzzel fuzzel
+helix helix
+hypr hyprland hypridle hyprlock hyprsunset waybar swaync swww wallust cliphist wl-clipboard polkit-gnome network-manager-applet blueman playerctl pavucontrol pamixer thunar grim slurp swappy brightnessctl jq curl python mpv imv ffmpeg imagemagick qt5ct qt6ct nwg-look nwg-displays
+kitty kitty wl-clipboard
+niri niri xwayland-satellite fuzzel swaync swaylock brightnessctl
+nvim neovim git curl
+rofi rofi jq playerctl curl python
+starship starship
+tmux tmux
+zellij zellij

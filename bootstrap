@@ -1,0 +1,561 @@
+#!/bin/sh
+set -u
+
+REPO=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+COMPONENTS="alacritty cava fastfetch fish fuzzel helix hypr kitty niri nvim rofi starship tmux zellij"
+LINK=1
+DO_DEPS=1
+DO_FONTS=0
+DRY=0
+ASSUME=0
+ALL=0
+ONLY=
+SELECTED=
+SEEN=
+PM=
+DEPLOYED=0
+SKIPPED=0
+BACKED=0
+PKGS_OK=0
+PKGS_SKIP=0
+BACKUP_ROOT=$HOME/.dotfiles-backup/$(date +%Y%m%d-%H%M%S)
+TMP=$(mktemp -d 2>/dev/null) || { printf '[error] mktemp failed\n' >&2; exit 1; }
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+
+say() { printf '%s\n' "$*"; }
+ok() { printf '[ok] %s\n' "$*"; }
+warn() { printf '[warn] %s\n' "$*"; }
+skipmsg() { printf '[skip] %s\n' "$*"; }
+die() { printf '[error] %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+usage: bootstrap [options]
+
+  -a, --all          install every component
+  -o, --only LIST    comma separated components to install
+  -l, --link         symlink configs into ~/.config (default)
+  -c, --copy         copy configs instead of symlinking
+      --deps         install dependencies (default)
+      --no-deps      skip package installation
+      --fonts        download JetBrainsMono NF and CaskaydiaCove NF
+  -n, --dry-run      print actions without changing anything
+  -y, --yes          do not prompt, assume yes
+  -h, --help         show this help
+
+components:
+  alacritty cava fastfetch fish fuzzel helix hypr kitty
+  niri nvim rofi starship tmux zellij
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case $1 in
+    -a|--all) ALL=1 ;;
+    -o|--only) [ $# -ge 2 ] || die "--only needs a value"; ONLY=$2; shift ;;
+    --only=*) ONLY=${1#*=} ;;
+    -l|--link) LINK=1 ;;
+    -c|--copy) LINK=0 ;;
+    --deps) DO_DEPS=1 ;;
+    --no-deps) DO_DEPS=0 ;;
+    --fonts) DO_FONTS=1 ;;
+    -n|--dry-run) DRY=1 ;;
+    -y|--yes) ASSUME=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown option: $1" ;;
+  esac
+  shift
+done
+
+has_component() {
+  local c
+  for c in $COMPONENTS; do [ "$c" = "$1" ] && return 0; done
+  return 1
+}
+
+component_at() {
+  local i c
+  i=1
+  for c in $COMPONENTS; do
+    if [ "$i" = "$1" ]; then printf '%s' "$c"; return 0; fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
+select_components() {
+  local i c n ans picked bad
+  if [ -n "$ONLY" ]; then
+    for c in $(printf '%s' "$ONLY" | tr ',' ' '); do
+      has_component "$c" || die "unknown component: $c"
+      SELECTED="$SELECTED $c"
+    done
+    return
+  fi
+  if [ "$ALL" = 1 ]; then SELECTED=$COMPONENTS; return; fi
+  while :; do
+    say "components:"
+    i=1
+    for c in $COMPONENTS; do
+      printf '%3d  %s\n' "$i" "$c"
+      i=$((i + 1))
+    done
+    printf 'a = all, q = quit\n> '
+    read -r ans || die "no selection, use --all or --only"
+    case $ans in
+      q|Q) exit 0 ;;
+      a|A) SELECTED=$COMPONENTS; return ;;
+    esac
+    [ -n "$ans" ] || continue
+    picked=
+    bad=0
+    for n in $(printf '%s' "$ans" | tr ',' ' '); do
+      case $n in
+        ''|*[!0-9]*) bad=1; continue ;;
+      esac
+      c=$(component_at "$n") || { bad=1; continue; }
+      picked="$picked $c"
+    done
+    if [ "$bad" = 0 ] && [ -n "$picked" ]; then
+      SELECTED=$picked
+      return
+    fi
+    say "invalid selection"
+  done
+}
+
+canon() { readlink -f "$1" 2>/dev/null || printf '%s' "$1"; }
+
+same_copy() {
+  if [ -d "$1" ] && [ -d "$2" ]; then
+    diff -rq "$1" "$2" >/dev/null 2>&1
+  elif [ -f "$1" ] && [ -f "$2" ]; then
+    cmp -s "$1" "$2"
+  else
+    return 1
+  fi
+}
+
+backup() {
+  local src rel dst n
+  src=$1
+  rel=${src#"$HOME"/}
+  dst=$BACKUP_ROOT/$rel
+  n=1
+  while [ -e "$dst" ] || [ -L "$dst" ]; do
+    dst=$BACKUP_ROOT/$rel.$n
+    n=$((n + 1))
+  done
+  BACKED=$((BACKED + 1))
+  if [ "$DRY" = 1 ]; then
+    say "  would back up $src -> $dst"
+    return
+  fi
+  mkdir -p "$(dirname "$dst")" || die "cannot create backup dir for $src"
+  mv "$src" "$dst" || die "cannot move $src"
+  say "  backed up $src -> $dst"
+}
+
+place() {
+  local src dst
+  src=$1
+  dst=$2
+  if [ "$LINK" = 1 ] && [ -L "$dst" ] && [ "$(canon "$dst")" = "$(canon "$src")" ]; then
+    SKIPPED=$((SKIPPED + 1))
+    return
+  fi
+  if [ "$LINK" = 0 ] && [ ! -L "$dst" ] && same_copy "$src" "$dst"; then
+    SKIPPED=$((SKIPPED + 1))
+    return
+  fi
+  if [ -e "$dst" ] || [ -L "$dst" ]; then backup "$dst"; fi
+  DEPLOYED=$((DEPLOYED + 1))
+  if [ "$DRY" = 1 ]; then
+    if [ "$LINK" = 1 ]; then say "  would link $dst"; else say "  would copy $dst"; fi
+    return
+  fi
+  mkdir -p "$(dirname "$dst")"
+  if [ "$LINK" = 1 ]; then
+    ln -s "$src" "$dst" || die "cannot link $dst"
+    say "  linked $dst"
+  else
+    cp -a "$src" "$dst" || die "cannot copy $dst"
+    say "  copied $dst"
+  fi
+}
+
+prep_dir() {
+  local t
+  t=$1
+  if [ -L "$t" ]; then
+    backup "$t"
+  elif [ -e "$t" ] && [ ! -d "$t" ]; then
+    backup "$t"
+  fi
+  [ "$DRY" = 1 ] || mkdir -p "$t"
+}
+
+excludes() {
+  case $1 in
+    fish) printf 'fish_variables' ;;
+    helix) printf 'runtime' ;;
+    rofi) printf '.current_wallpaper' ;;
+  esac
+}
+
+deploy_tree() {
+  local src dst excl e b x drop
+  src=$1
+  dst=$2
+  excl=$(excludes "$(basename "$src")")
+  prep_dir "$dst"
+  for e in "$src"/* "$src"/.[!.]*; do
+    [ -e "$e" ] || [ -L "$e" ] || continue
+    b=${e##*/}
+    drop=0
+    for x in $excl; do [ "$b" = "$x" ] && drop=1; done
+    if [ "$drop" = 1 ]; then
+      if [ -L "$dst/$b" ] && [ ! -e "$dst/$b" ]; then
+        [ "$DRY" = 1 ] || rm -f "$dst/$b"
+      fi
+      continue
+    fi
+    place "$e" "$dst/$b"
+  done
+}
+
+deploy() {
+  printf '\n%s\n' "$1"
+  if [ ! -e "$REPO/$1" ]; then
+    warn "$1 config missing in repo"
+    return
+  fi
+  case $1 in
+    tmux)
+      place "$REPO/tmux/tmux.conf" "$HOME/.tmux.conf"
+      place "$REPO/tmux/tmux.conf.local" "$HOME/.tmux.conf.local"
+      ;;
+    fish|helix|rofi)
+      deploy_tree "$REPO/$1" "$HOME/.config/$1"
+      ;;
+    *)
+      place "$REPO/$1" "$HOME/.config/$1"
+      ;;
+  esac
+}
+
+chmod_scripts() {
+  [ "$DRY" = 1 ] && return
+  case " $SELECTED " in
+    *" hypr "*) chmod +x "$REPO"/hypr/scripts/*.sh "$REPO"/hypr/UserScripts/*.sh "$REPO"/hypr/initial-boot.sh 2>/dev/null ;;
+  esac
+}
+
+pm_name() {
+  case $1 in
+    apt-get) printf 'apt' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+detect_pm() {
+  local p
+  for p in apk pacman apt-get dnf; do
+    if command -v "$p" >/dev/null 2>&1; then
+      pm_name "$p"
+      return
+    fi
+  done
+}
+
+priv() {
+  if [ "$(id -u)" = 0 ]; then "$@"; else sudo "$@"; fi
+}
+
+list_avail() {
+  case $PM in
+    apk) apk search -q -x 2>/dev/null ;;
+    pacman) pacman -Slq 2>/dev/null ;;
+    apt) apt-cache pkgnames 2>/dev/null ;;
+  esac
+}
+
+load_avail() {
+  list_avail | sort -u > "$TMP/avail"
+  [ -s "$TMP/avail" ] && return
+  [ "$DRY" = 1 ] && return
+  case $PM in
+    apk) priv apk update >/dev/null 2>&1 ;;
+    pacman) priv pacman -Sy --noconfirm >/dev/null 2>&1 ;;
+    apt) priv apt-get update -qq >/dev/null 2>&1 ;;
+  esac
+  list_avail | sort -u > "$TMP/avail"
+}
+
+known() {
+  [ -s "$TMP/avail" ] || return 0
+  grep -qxF "$1" "$TMP/avail"
+}
+
+tracked() {
+  case " $SEEN " in *" $1 "*) return 0 ;; esac
+  return 1
+}
+
+installed() {
+  case $PM in
+    apk) apk info -e "$1" >/dev/null 2>&1 ;;
+    pacman) pacman -Q "$1" >/dev/null 2>&1 ;;
+    apt) dpkg -s "$1" >/dev/null 2>&1 ;;
+    dnf) rpm -q "$1" >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
+pkg_missing() {
+  case $PM in
+    apk) ! apk search -q -x "$1" 2>/dev/null | grep -qxF "$1" ;;
+    pacman) ! pacman -Si "$1" >/dev/null 2>&1 ;;
+    apt) ! apt-cache show "$1" >/dev/null 2>&1 ;;
+    dnf) ! dnf -q list --available "$1" >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
+pm_install() {
+  case $PM in
+    apk) priv apk add --no-cache "$@" ;;
+    pacman) priv pacman -S --needed --noconfirm "$@" ;;
+    apt) priv apt-get install -y "$@" ;;
+    dnf) priv dnf install -y "$@" ;;
+  esac
+}
+
+deps_for() {
+  local f
+  f=$REPO/deps/$PM
+  [ -f "$f" ] || return 0
+  awk -v c="$1" '$1==c {$1=""; sub(/^[ \t]+/, ""); print}' "$f"
+}
+
+aur_for() {
+  local f
+  f=$REPO/deps/aur
+  [ -f "$f" ] || return 0
+  awk -v c="$1" '$1==c {$1=""; sub(/^[ \t]+/, ""); print}' "$f"
+}
+
+install_aur() {
+  local list c p helper
+  [ "$PM" = pacman ] || return
+  [ -f "$REPO/deps/aur" ] || return
+  list=
+  for c in $SELECTED; do
+    for p in $(aur_for "$c"); do
+      tracked "$p" && continue
+      SEEN="$SEEN $p"
+      installed "$p" && continue
+      list="$list $p"
+    done
+  done
+  [ -n "$list" ] || return
+  if [ "$(id -u)" = 0 ]; then
+    warn "AUR packages need a normal user: $(printf '%s' "$list" | sed 's/^ //')"
+    return
+  fi
+  helper=
+  command -v paru >/dev/null 2>&1 && helper=paru
+  [ -z "$helper" ] && command -v yay >/dev/null 2>&1 && helper=yay
+  if [ -z "$helper" ]; then
+    warn "AUR packages not installed: $(printf '%s' "$list" | sed 's/^ //')"
+    return
+  fi
+  if [ "$DRY" = 1 ]; then
+    say "  would install AUR: $(printf '%s' "$list" | sed 's/^ //')"
+    return
+  fi
+  if $helper -S --needed --noconfirm $list >"$TMP/aur.log" 2>&1; then
+    ok "AUR packages installed"
+  else
+    warn "AUR install failed, run $helper -S$list manually"
+  fi
+}
+
+install_deps() {
+  local c p todo count
+  PM=$(detect_pm)
+  if [ -z "$PM" ]; then
+    warn "no supported package manager found, skipping dependencies"
+    return
+  fi
+  say "package manager: $PM"
+  load_avail
+  SEEN=
+  todo=
+  count=0
+  for c in $SELECTED; do
+    for p in $(deps_for "$c"); do
+      tracked "$p" && continue
+      SEEN="$SEEN $p"
+      installed "$p" && continue
+      if [ -s "$TMP/avail" ] && ! known "$p"; then
+        skipmsg "$p not packaged for $PM"
+        PKGS_SKIP=$((PKGS_SKIP + 1))
+        continue
+      fi
+      todo="$todo $p"
+      count=$((count + 1))
+    done
+  done
+  install_aur
+  [ "$count" -gt 0 ] || return
+  if [ "$DRY" = 1 ]; then
+    say "  would install: $(printf '%s' "$todo" | sed 's/^ //')"
+    return
+  fi
+  if pm_install $todo >"$TMP/deps.log" 2>&1; then
+    PKGS_OK=$((PKGS_OK + count))
+    ok "installed $count packages"
+    return
+  fi
+  for p in $todo; do
+    if pm_install "$p" >"$TMP/one.log" 2>&1; then
+      PKGS_OK=$((PKGS_OK + 1))
+    elif pkg_missing "$p"; then
+      skipmsg "$p not packaged for $PM"
+      PKGS_SKIP=$((PKGS_SKIP + 1))
+    else
+      skipmsg "$p failed to install"
+      PKGS_SKIP=$((PKGS_SKIP + 1))
+    fi
+  done
+}
+
+install_fonts() {
+  local f d
+  say "fonts"
+  if [ "$DRY" = 1 ]; then
+    say "  would download JetBrainsMono NF and CaskaydiaCove NF"
+    return
+  fi
+  command -v curl >/dev/null 2>&1 || { warn "curl missing, fonts skipped"; return; }
+  command -v unzip >/dev/null 2>&1 || { warn "unzip missing, fonts skipped"; return; }
+  d=$HOME/.local/share/fonts
+  mkdir -p "$d"
+  for f in JetBrainsMono CascadiaCode; do
+    if curl -fsSL --retry 2 -o "$TMP/$f.zip" "https://github.com/ryanoasis/nerd-fonts/releases/latest/download/$f.zip"; then
+      if unzip -oq "$TMP/$f.zip" -d "$d/$f"; then
+        ok "font $f"
+      else
+        warn "font extract failed: $f"
+      fi
+    else
+      warn "font download failed: $f"
+    fi
+  done
+  command -v fc-cache >/dev/null 2>&1 && fc-cache -f >/dev/null 2>&1
+}
+
+nvim_restore() {
+  local lock
+  command -v nvim >/dev/null 2>&1 || { warn "nvim not installed, plugins not restored"; return; }
+  lock=$HOME/.config/nvim/lazy-lock.json
+  [ -f "$lock" ] && cp "$lock" "$TMP/lock.before"
+  say "nvim: restoring locked plugins"
+  if nvim --headless "+Lazy! restore" +qa >"$TMP/nvim.log" 2>&1; then
+    ok "nvim plugins restored"
+    if [ -f "$TMP/lock.before" ] && [ -f "$lock" ] && ! cmp -s "$TMP/lock.before" "$lock"; then
+      warn "nvim updated lazy-lock.json in $HOME/.config/nvim"
+    fi
+  else
+    warn "nvim restore failed, run nvim once manually"
+  fi
+}
+
+login_shell() {
+  awk -F: -v u="$(id -un)" '$1==u {print $7}' /etc/passwd 2>/dev/null
+}
+
+fish_shell() {
+  local fishbin cur a
+  fishbin=$(command -v fish 2>/dev/null) || { warn "fish not installed"; return; }
+  cur=$(login_shell)
+  case $cur in *fish) return ;; esac
+  if [ "$DRY" = 1 ]; then
+    say "  would offer to set $fishbin as login shell"
+    return
+  fi
+  if [ "$ASSUME" = 1 ] || [ ! -t 0 ]; then
+    warn "login shell is ${cur:-unknown}, run: chsh -s $fishbin"
+    return
+  fi
+  printf 'set %s as login shell? [y/N] ' "$fishbin"
+  read -r a || a=
+  case $a in y|Y) chsh -s "$fishbin" || warn "chsh failed" ;; esac
+}
+
+post() {
+  local c
+  for c in $SELECTED; do
+    case $c in
+      nvim) [ "$DRY" = 1 ] && continue; nvim_restore ;;
+      hypr) [ "$DRY" = 1 ] || mkdir -p "$HOME/Pictures/wallpapers" ;;
+      fish) [ "$DRY" = 1 ] && continue; fish_shell ;;
+    esac
+  done
+}
+
+warnings() {
+  local d
+  case " $SELECTED " in
+    *" hypr "*)
+      for d in waybar swaync quickshell; do
+        [ -d "$HOME/.config/$d" ] || warn "$d config missing, hypr references it"
+      done
+      [ "$PM" = apk ] && warn "hypr on Alpine needs edge/testing, systemd-only scripts will not work"
+      ;;
+  esac
+  case " $SELECTED " in
+    *" helix "*) [ -L "$REPO/helix/runtime" ] && warn "helix/runtime is a broken symlink in the repo, skipped" ;;
+  esac
+  case " $SELECTED " in
+    *" fish "*)
+      command -v pokemon-colorscripts >/dev/null 2>&1 || warn "pokemon-colorscripts missing, fish config will complain"
+      [ -f "$HOME/.cargo/env.fish" ] || warn "fish conf.d/rustup.fish expects ~/.cargo/env.fish"
+      ;;
+  esac
+  case " $SELECTED " in
+    *" zellij "*) grep -q '/home/' "$REPO/zellij/layout.kdl" 2>/dev/null && warn "zellij/layout.kdl contains a hardcoded /home path" ;;
+  esac
+}
+
+summary() {
+  printf '\n'
+  say "deployed: $DEPLOYED, skipped: $SKIPPED, backed up: $BACKED"
+  [ "$DO_DEPS" = 1 ] && say "packages installed: $PKGS_OK, skipped: $PKGS_SKIP"
+  [ "$BACKED" -gt 0 ] && say "backups: $BACKUP_ROOT"
+  return 0
+}
+
+[ "$(id -u)" = 0 ] && warn "running as root, configs go to $HOME"
+
+select_components
+[ -n "$SELECTED" ] || die "nothing selected"
+
+case " $SELECTED " in
+  *" nvim "*) command -v git >/dev/null 2>&1 || warn "git missing, nvim plugin install needs it" ;;
+esac
+
+for c in $SELECTED; do deploy "$c"; done
+chmod_scripts
+
+[ "$DO_DEPS" = 1 ] && install_deps
+[ "$DO_FONTS" = 1 ] && install_fonts
+
+if [ "$DRY" = 0 ]; then
+  post
+fi
+
+warnings
+summary
+exit 0
