@@ -25,6 +25,9 @@ end
 if ! builtin functions --query __zoxide_cd_internal
     string replace --regex -- '^function cd\s' 'function __zoxide_cd_internal ' <$__fish_data_dir/functions/cd.fish | source
 end
+alias l='eza --tree --level=2 --icons'
+alias c='cd ..'
+
 
 alias ls='eza --icons --group-directories-first'
 alias ll='eza -lah --icons --group-directories-first --git'
@@ -32,6 +35,8 @@ alias la='eza -a --icons --group-directories-first'
 alias lt='eza --tree --level=2 --icons'
 alias llt='eza -lah --tree --level=2 --icons'
 # cd + custom logic based on the value of _ZO_ECHO.
+set -gx EDITOR nvim
+
 function __zoxide_cd
     if set -q __zoxide_loop
         builtin echo "zoxide: infinite loop detected"
@@ -115,21 +120,15 @@ alias zi=__zoxide_zi
 # ~/.config/fish/config.fish):
 #
 #   zoxide init fish | source
-alias c="clear"
+alias max="ssh-list" # https://github.com/akinoiro/ssh-list
+alias d="clear"
 # alias c="clear; neofetch --off --block_range 0 7"
 # neofetch --config ~/.config/neofetch/config_def.conf
 # alias c="neofetch --block_range 0 7"
 # alias c="neofetch --kitty ~/Pictures/Nord/unsplash20.png"
 # nitch
 alias n='nitch'
-alias fox='catnip -c ~/.config/catnip/config_fox.toml'
-alias fox2='catnip -c ~/.config/catnip/config_fox2.toml'
-alias fox3='catnip -c ~/.config/catnip/config_fox3.toml'
-
-# alias ls='lsd -a'
-# alias ll='lsd -ahl'
 alias icat='kitten icat'
-alias cat='catnip'
 export LS_COLORS="*.ini=31:*.ttf=36:*.toml=35"
 
 #alias c="clear; neofetch --block_range 0 7"
